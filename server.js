@@ -1,12 +1,12 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const db = require("./db");
 
 const app = express();
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 const PORT = process.env.PORT || 3000;
-const DATA_FILE = path.join(__dirname, "data.json");
 const ENROLLMENTS_FILE = path.join(__dirname, "enrollments.json");
 const FEEDBACK_FILE = path.join(__dirname, "feedback.json");
 
@@ -21,14 +21,11 @@ app.use(function (req, res, next) {
 
 app.use(express.static(path.join(__dirname, "public"), { index: false }));
 
-//работа с файлом данных
-
-function readCourses() {
-    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-}
-
-function writeCourses(courses) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(courses, null, 2), "utf8");
+async function readCourses() {
+    return db.getCollection("courses")
+        .find({}, { projection: { _id: 0 } })
+        .sort({ id: 1 })
+        .toArray();
 }
 
 function validateCourse(course) {
@@ -77,9 +74,9 @@ function createCourse(course, id) {
 
 const courseCollectionRoutes = ["/api/items", "/api/courses"];
 
-app.get("/", function (req, res) {
+app.get("/", async function (req, res) {
     try {
-        const allCourses = readCourses();
+        const allCourses = await readCourses();
         const categories = [...new Set(allCourses.map(course => course.category))].sort();
         const categoryFilter = typeof req.query.category === "string" ? req.query.category : "";
         const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -181,10 +178,10 @@ app.post("/feedback", function (req, res) {
     }
 });
 
-app.get("/film/:id", function (req, res) {
+app.get("/film/:id", async function (req, res) {
     try {
         const id = Number(req.params.id);
-        const course = readCourses().find(item => item.id === id);
+        const course = await db.getCollection("courses").findOne({ id: id }, { projection: { _id: 0 } });
         if (!course) {
             return res.status(404).render("404", {
                 title: "Курс не найден",
@@ -211,11 +208,11 @@ app.get("/film/:id", function (req, res) {
     }
 });
 
-app.post("/film/:id/enroll", function (req, res) {
+app.post("/film/:id/enroll", async function (req, res) {
     const id = Number(req.params.id);
     let course;
     try {
-        course = readCourses().find(item => item.id === id);
+        course = await db.getCollection("courses").findOne({ id: id }, { projection: { _id: 0 } });
         if (!course) {
             return res.status(404).render("404", {
                 title: "Курс не найден",
@@ -272,9 +269,9 @@ app.post("/film/:id/enroll", function (req, res) {
     }
 });
 
-app.get(courseCollectionRoutes, function (req, res) {
+app.get(courseCollectionRoutes, async function (req, res) {
     try {
-        let courses = readCourses();
+        let courses = await readCourses();
         const category = req.query.category || req.query.genre;
         if (category) {
             courses = courses.filter(course => course.category === category);
@@ -291,10 +288,10 @@ app.get(courseCollectionRoutes, function (req, res) {
     }
 });
 
-app.get(["/api/items/:id", "/api/courses/:id"], function (req, res) {
+app.get(["/api/items/:id", "/api/courses/:id"], async function (req, res) {
     try {
         const id = Number(req.params.id);
-        const course = readCourses().find(item => item.id === id);
+        const course = await db.getCollection("courses").findOne({ id: id }, { projection: { _id: 0 } });
         if (!course) {
             return res.status(404).json({ error: "Курс не найден" });
         }
@@ -304,7 +301,7 @@ app.get(["/api/items/:id", "/api/courses/:id"], function (req, res) {
     }
 });
 
-app.post(courseCollectionRoutes, function (req, res) {
+app.post(courseCollectionRoutes, async function (req, res) {
     const courseData = req.body;
     const problems = validateCourse(courseData);
     if (problems.length > 0) {
@@ -312,18 +309,17 @@ app.post(courseCollectionRoutes, function (req, res) {
     }
 
     try {
-        const courses = readCourses();
+        const courses = await readCourses();
         const maxId = courses.reduce((max, course) => Math.max(max, course.id), 0);
         const newCourse = createCourse(courseData, maxId + 1);
-        courses.push(newCourse);
-        writeCourses(courses);
+        await db.getCollection("courses").insertOne(newCourse);
         res.status(201).json(newCourse);
     } catch (err) {
         res.status(500).json({ error: "Не удалось сохранить курс" });
     }
 });
 
-app.post("/api/enrollments", function (req, res) {
+app.post("/api/enrollments", async function (req, res) {
     const { name, email, courseId } = req.body || {};
     const courseNumber = Number(courseId);
 
@@ -334,7 +330,7 @@ app.post("/api/enrollments", function (req, res) {
     }
 
     try {
-        const course = readCourses().find(item => item.id === courseNumber);
+        const course = await db.getCollection("courses").findOne({ id: courseNumber }, { projection: { _id: 0 } });
         if (!course) {
             return res.status(404).json({ error: "Курс не найден" });
         }
@@ -378,6 +374,13 @@ app.use(function (req, res) {
 
 });
 
-app.listen(PORT, function () {
-    console.log(`Сервер запущен: http://localhost:${PORT}`);
-});
+db.connect()
+    .then(function () {
+        app.listen(PORT, function () {
+            console.log(`Сервер запущен: http://localhost:${PORT}`);
+        });
+    })
+    .catch(function (error) {
+        console.error("Не удалось подключиться к MongoDB:", error.message);
+        process.exitCode = 1;
+    });
